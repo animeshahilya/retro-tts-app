@@ -1,0 +1,114 @@
+--- app/src/main/cpp/native-lib.cpp
++++ app/src/main/cpp/native-lib.cpp
+@@ -4,6 +4,8 @@
+ #include <cstring>
+ #include <cstdlib>
+ #include <cctype>
++#include <cmath>
++#include <algorithm>
+ 
+ extern "C" {
+     #include "reciter.h"
+@@ -25,6 +27,62 @@
+     int debug = 0;
+ }
+ 
++const int TARGET_SAMPLE_RATE = 48000;
++
++// Cubic Hermite Spline interpolation
++float cubicInterpolate(float y0, float y1, float y2, float y3, float mu) {
++    float a0, a1, a2, a3, mu2;
++    mu2 = mu * mu;
++    a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
++    a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
++    a2 = -0.5f * y0 + 0.5f * y2;
++    a3 = y1;
++    return (a0 * mu * mu2 + a1 * mu2 + a2 * mu + a3);
++}
++
++// Low-pass filter (1-pole IIR) to remove aliasing harshness
++void applyLowPassFilter(std::vector<int16_t>& samples, float alpha) {
++    if (samples.empty()) return;
++    float prev = samples[0];
++    for (size_t i = 1; i < samples.size(); ++i) {
++        float current = samples[i];
++        prev = prev + alpha * (current - prev);
++        samples[i] = static_cast<int16_t>(prev);
++    }
++}
++
++jbyteArray upscaleAndSmooth(JNIEnv* env, const void* inputData, int inputSamplesCount, int sourceSampleRate, bool is8Bit) {
++    if (inputSamplesCount <= 0) return env->NewByteArray(0);
++    const uint8_t* in8 = static_cast<const uint8_t*>(inputData);
++    const int16_t* in16 = static_cast<const int16_t*>(inputData);
++    auto getSample = [&](int index) -> float {
++        if (index < 0) index = 0;
++        if (index >= inputSamplesCount) index = inputSamplesCount - 1;
++        if (is8Bit) return (static_cast<float>(in8[index]) - 128.0f) * 256.0f;
++        return static_cast<float>(in16[index]);
++    };
++    double ratio = static_cast<double>(sourceSampleRate) / TARGET_SAMPLE_RATE;
++    int outputSamplesCount = static_cast<int>(inputSamplesCount / ratio);
++    std::vector<int16_t> outputBuffer(outputSamplesCount);
++    for (int i = 0; i < outputSamplesCount; ++i) {
++        double position = i * ratio;
++        int idx = static_cast<int>(position);
++        float mu = static_cast<float>(position - idx);
++        float interpolated = cubicInterpolate(getSample(idx - 1), getSample(idx), getSample(idx + 1), getSample(idx + 2), mu);
++        if (interpolated > 32767.0f) interpolated = 32767.0f;
++        if (interpolated < -32768.0f) interpolated = -32768.0f;
++        outputBuffer[i] = static_cast<int16_t>(interpolated);
++    }
++    float alpha = is8Bit ? 0.35f : (sourceSampleRate < 20000 ? 0.45f : 0.6f);
++    applyLowPassFilter(outputBuffer, alpha);
++    for (int i = 0; i < outputSamplesCount; ++i) {
++        float val = outputBuffer[i] * 1.2f;
++        outputBuffer[i] = static_cast<int16_t>(std::max(-32768.0f, std::min(32767.0f, val)));
++    }
++    jbyteArray result = env->NewByteArray(outputSamplesCount * sizeof(int16_t));
++    env->SetByteArrayRegion(result, 0, outputSamplesCount * sizeof(int16_t), reinterpret_cast<const jbyte*>(outputBuffer.data()));
++    return result;
++}
+ 
+ // ================= SAM Core =================
+ jbyteArray doSynthSam(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
+@@ -58,11 +116,7 @@
+     
+     char* buffer = GetBuffer();
+     int length = GetBufferLength();
+-    
+-    jbyteArray result = env->NewByteArray(length);
+-    if(length > 0) {
+-        env->SetByteArrayRegion(result, 0, length, (const jbyte*)buffer);
+-    }
++    jbyteArray result = upscaleAndSmooth(env, buffer, length, 22050, true);
+     
+     env->ReleaseStringUTFChars(text, nativeString);
+     return result;
+@@ -87,11 +141,7 @@
+     TextToSpeechStartup(&initParams);
+     TextToSpeechSpeak(const_cast<char*>(nativeString), 0);
+     TextToSpeechShutdown();
+-    
+-    jbyteArray result = env->NewByteArray(dectalkBuffer.size() * 2);
+-    if(!dectalkBuffer.empty()) {
+-        env->SetByteArrayRegion(result, 0, dectalkBuffer.size() * 2, (const jbyte*)dectalkBuffer.data());
+-    }
++    jbyteArray result = upscaleAndSmooth(env, dectalkBuffer.data(), dectalkBuffer.size(), 11025, false);
+     
+     env->ReleaseStringUTFChars(text, nativeString);
+     return result;
+@@ -118,10 +168,7 @@
+     
+     espeakBuffer.clear();
+     espeak_Synth(nativeString, strlen(nativeString) + 1, 0, 0, 0, 0, nullptr, nullptr);
+-    
+-    jbyteArray result = env->NewByteArray(espeakBuffer.size() * 2);
+-    if(!espeakBuffer.empty()) {
+-        env->SetByteArrayRegion(result, 0, espeakBuffer.size() * 2, (const jbyte*)espeakBuffer.data());
+-    }
++    jbyteArray result = upscaleAndSmooth(env, espeakBuffer.data(), espeakBuffer.size(), 22050, false);
++    
+     env->ReleaseStringUTFChars(text, nativeString);
+     return result;
+

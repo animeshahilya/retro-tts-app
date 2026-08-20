@@ -46,17 +46,8 @@ class RetroTtsService : TextToSpeechService() {
         activeEngine = prefs.getString("active_engine", "SAM") ?: "SAM"
 
         // Set audio parameters based on the engine
-        val sampleRate = when {
-            activeEngine == "SAM" -> 22050
-            activeEngine == "DECTALK" -> 11025
-            activeEngine.startsWith("ESPEAK") -> 22050
-            else -> 22050
-        }
-        val audioFormat = when {
-            activeEngine == "SAM" -> AudioFormat.ENCODING_PCM_8BIT
-            activeEngine == "DECTALK" || activeEngine.startsWith("ESPEAK") -> AudioFormat.ENCODING_PCM_16BIT
-            else -> AudioFormat.ENCODING_PCM_16BIT
-        }
+        val sampleRate = 48000
+        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
         callback.start(sampleRate, audioFormat, 1)
 

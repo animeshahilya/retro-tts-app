@@ -91,10 +91,10 @@ class MainActivity : ComponentActivity() {
                                 val r = speechRate.toInt()
                                 if (selectedEngine == "SAM") {
                                     val pcm = synthSam(text, p, r)
-                                    playAudio(pcm, 22050, AudioFormat.ENCODING_PCM_8BIT)
+                                    playAudio(pcm, 48000, AudioFormat.ENCODING_PCM_16BIT)
                                 } else if (selectedEngine == "DECTALK") {
                                     val pcm = synthDectalk(text, p, r)
-                                    playAudio(pcm, 11025, AudioFormat.ENCODING_PCM_16BIT)
+                                    playAudio(pcm, 48000, AudioFormat.ENCODING_PCM_16BIT)
                                 } else if (selectedEngine.startsWith("ESPEAK")) {
                                     val variant = when (selectedEngine) {
                                         "ESPEAK (whisper)" -> "en+whisper"
@@ -108,7 +108,7 @@ class MainActivity : ComponentActivity() {
                                         else -> "en"
                                     }
                                     val pcm = synthEspeak(text, dataPath, variant, p, r)
-                                    playAudio(pcm, 22050, AudioFormat.ENCODING_PCM_16BIT)
+                                    playAudio(pcm, 48000, AudioFormat.ENCODING_PCM_16BIT)
                                 }
                             } finally {
                                 isSpeaking = false
