@@ -1,0 +1,7 @@
+[submodule "app/src/main/cpp/dectalk_repo"]
+	path = app/src/main/cpp/dectalk_repo
+	url = https://github.com/dectalk/DECtalkMini.git
+	branch = dectalk-develop
+[submodule "app/src/main/cpp/sam_repo"]
+	path = app/src/main/cpp/sam_repo
+	url = https://github.com/s-macke/SAM.git
