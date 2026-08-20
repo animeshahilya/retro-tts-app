@@ -23,3 +23,4 @@ app/build/
 # Keystore files
 *.jks
 *.keystore
+keystore.properties

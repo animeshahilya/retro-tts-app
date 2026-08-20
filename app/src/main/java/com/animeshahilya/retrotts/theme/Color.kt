@@ -1,4 +1,4 @@
-package com.example.retrottsapp.theme
+package com.animeshahilya.retrotts.theme
 
 import androidx.compose.ui.graphics.Color
 
