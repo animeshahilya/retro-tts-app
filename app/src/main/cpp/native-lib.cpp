@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <algorithm>
+#include <map>
 #include <mutex>
 
 extern "C" {
@@ -41,6 +42,8 @@ static bool g_espeakInited = false;
 // the sinc kernel *is* the anti-imaging low-pass, bandlimiting to the source Nyquist so upsampling
 // to 48 kHz does not inject spurious high-frequency images.
 static const float PI = 3.14159265358979323846f;
+static const int RESAMPLER_HALF = 16;      // 33-tap kernel
+static const int RESAMPLER_PHASES = 1024;  // polyphase table resolution
 
 static float sinc(float x) {
     if (x == 0.0f) return 1.0f;
@@ -54,6 +57,31 @@ static float sincKernel(float x, int halfLen) {
     if (x < -static_cast<float>(halfLen) || x > static_cast<float>(halfLen)) return 0.0f;
     float w = 0.5f - 0.5f * cosf(2.0f * PI * (x + static_cast<float>(halfLen)) / (2.0f * static_cast<float>(halfLen)));
     return sinc(x) * w;
+}
+
+// Pre-computed polyphase filter bank. Building the kernel on the fly needs a sinf/cosf per tap per
+// output sample (tens of millions of trig calls for a long utterance). The resample ratio is fixed
+// per engine, so we precompute, for each of RESAMPLER_PHASES fractional phases, the (2*HALF+1)
+// kernel weights once and reuse them for every synthesis from that engine.
+static std::mutex g_filterMutex;
+static std::map<int, std::vector<float>> g_filterBanks; // sourceRate -> PHASES * (2*HALF+1) weights
+
+static const std::vector<float>& getFilterBank(int sourceRate) {
+    std::lock_guard<std::mutex> lk(g_filterMutex);
+    auto it = g_filterBanks.find(sourceRate);
+    if (it != g_filterBanks.end()) return it->second;
+    std::vector<float> bank(RESAMPLER_PHASES * (2 * RESAMPLER_HALF + 1));
+    for (int p = 0; p < RESAMPLER_PHASES; ++p) {
+        float frac = static_cast<float>(p) / RESAMPLER_PHASES; // interpolation offset in [0,1)
+        for (int k = -RESAMPLER_HALF; k <= RESAMPLER_HALF; ++k) {
+            // For output sample i: pos = i*ratio, center = floor(pos), frac = pos - center.
+            // The tap at integer lag k is evaluated at x = frac - k.
+            float x = frac - static_cast<float>(k);
+            bank[p * (2 * RESAMPLER_HALF + 1) + (k + RESAMPLER_HALF)] = sincKernel(x, RESAMPLER_HALF);
+        }
+    }
+    g_filterBanks.emplace(sourceRate, std::move(bank));
+    return g_filterBanks.find(sourceRate)->second;
 }
 
 // Resample an engine's native PCM up to the target 48 kHz / 16-bit mono stream the
@@ -77,7 +105,8 @@ jbyteArray upscaleAndSmooth(JNIEnv* env, const void* inputData, int inputSamples
     if (outputSamplesCount <= 0) outputSamplesCount = 1;
     std::vector<int16_t> outputBuffer(outputSamplesCount);
 
-    const int halfLen = 16; // 33-tap kernel: good stop-band for speech, cheap enough per utterance
+    const std::vector<float>& bank = getFilterBank(sourceSampleRate);
+    const int stride = 2 * RESAMPLER_HALF + 1;
 
     auto clampIdx = [&](int k) -> int {
         if (k < 0) return 0;
@@ -88,10 +117,13 @@ jbyteArray upscaleAndSmooth(JNIEnv* env, const void* inputData, int inputSamples
     for (int i = 0; i < outputSamplesCount; ++i) {
         double pos = i * ratio;
         int center = static_cast<int>(floor(pos));
+        float frac = static_cast<float>(pos - center);
+        int p = static_cast<int>(frac * RESAMPLER_PHASES) % RESAMPLER_PHASES;
+        if (p < 0) p += RESAMPLER_PHASES;
+        const float* w = &bank[p * stride];
         float acc = 0.0f;
-        for (int k = -halfLen; k <= halfLen; ++k) {
-            int idx = center + k;
-            acc += src[clampIdx(idx)] * sincKernel(static_cast<float>(pos - idx), halfLen);
+        for (int k = -RESAMPLER_HALF; k <= RESAMPLER_HALF; ++k) {
+            acc += src[clampIdx(center + k)] * w[k + RESAMPLER_HALF];
         }
         int v = static_cast<int>(lrintf(acc));
         if (v > 32767) v = 32767;
