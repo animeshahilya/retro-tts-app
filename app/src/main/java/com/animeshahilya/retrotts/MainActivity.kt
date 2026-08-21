@@ -44,6 +44,23 @@ data class EspeakVoice(val id: String, val label: String)
 // lang/<family>/<code> (e.g. lang/roa/fr); the !v directory holds the many named "retro" variant
 // voices (selected as en+<variant>). The list is derived from the data, so a fuller voice pack
 // (more languages) is unlocked automatically without code changes.
+// Extract the bundled mbrola executable (arm64) into the app files dir so eSpeak-NG can spawn it
+// (via execlp("mbrola")) when an MBROLA voice is selected. Idempotent.
+fun extractMbrola(context: Context) {
+    val exe = File(context.filesDir, "mbrola")
+    try {
+        if (!exe.exists()) {
+            context.resources.openRawResource(R.raw.mbrola).use { ins ->
+                FileOutputStream(exe).use { os -> ins.copyTo(os) }
+            }
+        }
+        exe.setReadable(true, false)
+        exe.setExecutable(true, false)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
 fun loadEspeakVoices(context: Context): List<EspeakVoice> {
     val dataDir = File(context.filesDir, "espeak-ng-data")
     if (!dataDir.isDirectory) return listOf(EspeakVoice("en", "English (default)"))
@@ -59,6 +76,11 @@ fun loadEspeakVoices(context: Context): List<EspeakVoice> {
     val variantsDir = File(File(dataDir, "voices"), "!v")
     variantsDir.listFiles()?.filter { it.isFile }?.map { it.name }?.sorted()?.forEach { v ->
         voices.add(EspeakVoice("en+$v", "en + $v"))
+    }
+    // MBROLA diphone voices: voices/mb/<mb-xxx> (selected as mb-<xxx>)
+    val mbDir = File(File(dataDir, "voices"), "mb")
+    mbDir.listFiles()?.filter { it.isFile }?.map { it.name }?.sorted()?.forEach { m ->
+        voices.add(EspeakVoice(m, "MBROLA $m"))
     }
     if (voices.isEmpty()) voices.add(EspeakVoice("en", "English (default)"))
     return voices
@@ -76,6 +98,9 @@ class MainActivity : ComponentActivity() {
         if (!File(filesDir, "espeak-ng-data").exists()) {
             unpackEspeakData(this)
         }
+
+        // Extract the mbrola executable so direct (FAB) eSpeak synthesis can use MBROLA voices.
+        extractMbrola(this)
 
         setContent {
             MaterialTheme {

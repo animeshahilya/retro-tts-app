@@ -263,6 +263,12 @@ static int espeak_callback(short *wav, int numsamples, int events) {
 // process (and with it any TalkBack session using this engine).
 static bool ensureEspeak(const char* path) {
     if (g_espeakInited) return true;
+    // eSpeak-NG spawns the "mbrola" executable via execlp(); make sure the directory that
+    // holds our extracted mbrola binary (the data path) is on PATH so it can be found.
+    const char* oldPath = getenv("PATH");
+    char newPath[4096];
+    snprintf(newPath, sizeof(newPath), "%s:%s", path, oldPath ? oldPath : "");
+    setenv("PATH", newPath, 1);
     int sr = espeak_Initialize(1, 0, path, espeakINITIALIZE_DONT_EXIT);
     if (sr <= 0) return false;
     g_espeakInited = true;
