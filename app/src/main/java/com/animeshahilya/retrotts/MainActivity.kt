@@ -380,12 +380,17 @@ class MainActivity : ComponentActivity() {
     companion object {
         fun unpackEspeakData(context: Context) {
             try {
-                if (File(context.filesDir, "espeak-ng-data").exists()) return
+                val dataDir = File(context.filesDir, "espeak-ng-data")
                 val resId = context.resources.getIdentifier("espeakdata", "raw", context.packageName)
                 if (resId == 0) return
+                val expected = readEspeakDataVersion(context, resId)
+                val versionFile = File(dataDir, "version")
+                if (expected != null && dataDir.exists() && versionFile.exists() && versionFile.readText().trim() == expected) return
+                if (expected == null && dataDir.exists()) return
+                if (dataDir.exists()) dataDir.deleteRecursively()
                 val inputStream = context.resources.openRawResource(resId)
                 val zipInputStream = ZipInputStream(inputStream)
-                
+
                 var zipEntry = zipInputStream.nextEntry
                 while (zipEntry != null) {
                     val newFile = File(context.filesDir, zipEntry.name)
@@ -407,6 +412,26 @@ class MainActivity : ComponentActivity() {
                 zipInputStream.close()
             } catch (e: Exception) {
                 e.printStackTrace()
+            }
+        }
+
+        private fun readEspeakDataVersion(context: Context, resId: Int): String? {
+            return try {
+                context.resources.openRawResource(resId).use { raw ->
+                    ZipInputStream(raw).use { zis ->
+                        var entry = zis.nextEntry
+                        while (entry != null) {
+                            if (entry.name == "version") {
+                                return zis.bufferedReader().readText().trim()
+                            }
+                            zis.closeEntry()
+                            entry = zis.nextEntry
+                        }
+                    }
+                }
+                null
+            } catch (e: Exception) {
+                null
             }
         }
     }

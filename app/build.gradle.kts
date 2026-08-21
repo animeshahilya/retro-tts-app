@@ -15,11 +15,11 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.animeshahilya.retrotts"
-    compileSdk = 36
+    compileSdk = 37
     defaultConfig {
         applicationId = "com.animeshahilya.retrotts"
-        minSdk = 24
-        targetSdk = 36
+        minSdk = 34
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
         externalNativeBuild { cmake { cFlags += "-fcommon"; cppFlags += "-std=c++17" } }
