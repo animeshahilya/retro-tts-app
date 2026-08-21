@@ -105,6 +105,27 @@ jbyteArray upscaleAndSmooth(JNIEnv* env, const void* inputData, int inputSamples
     float alpha = is8Bit ? 0.35f : (sourceSampleRate < 20000 ? 0.45f : 0.6f);
     applyLowPassFilter(outputBuffer, alpha);
 
+    // Peak-normalize instead of a fixed gain. A fixed gain clips any signal already near full
+    // scale; normalization keeps loud sources safe while lifting quiet ones for consistent
+    // loudness. We only attenuate when clipping would occur, and cap any boost so near-silent
+    // audio (mostly noise floor) is not amplified into harsh artifacts.
+    const int targetPeak = 30000; // ~ -0.8 dBFS, leaves headroom
+    int peak = 0;
+    for (int i = 0; i < outputSamplesCount; ++i) {
+        int a = outputBuffer[i] < 0 ? -outputBuffer[i] : outputBuffer[i];
+        if (a > peak) peak = a;
+    }
+    if (peak > 0) {
+        float scale = static_cast<float>(targetPeak) / peak;
+        if (scale > 4.0f) scale = 4.0f; // cap boost for very quiet sources
+        for (int i = 0; i < outputSamplesCount; ++i) {
+            float val = outputBuffer[i] * scale;
+            if (val > 32767.0f) val = 32767.0f;
+            if (val < -32768.0f) val = -32768.0f;
+            outputBuffer[i] = static_cast<int16_t>(val);
+        }
+    }
+
     int outBytes = outputSamplesCount * sizeof(int16_t);
     jbyteArray result = env->NewByteArray(outBytes);
     env->SetByteArrayRegion(result, 0, outBytes, reinterpret_cast<const jbyte*>(outputBuffer.data()));
