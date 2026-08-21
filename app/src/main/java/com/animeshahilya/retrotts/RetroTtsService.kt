@@ -22,9 +22,6 @@ class RetroTtsService : TextToSpeechService() {
         if (!espeakDataPath.exists()) {
             MainActivity.unpackEspeakData(this)
         }
-        // Extract the bundled mbrola executable (arm64) next to the data so eSpeak-NG's
-        // execlp("mbrola") can find it when an MBROLA voice is selected.
-        extractMbrola(this)
     }
 
     override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
