@@ -178,36 +178,38 @@ class MainActivity : ComponentActivity() {
                                 "ESPEAK (yelling)" to "eSpeak Yelling Variant"
                             )
                             engines.forEach { (engine, description) ->
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .height(56.dp)
-                                        .selectable(
-                                            selected = (engine == selectedEngine),
-                                            onClick = { 
-                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                selectedEngine = engine
-                                                prefs.edit().putString("active_engine", engine).apply()
-                                            },
-                                            role = Role.RadioButton
-                                        )
-                                        .semantics { 
-                                            contentDescription = description
-                                            stateDescription = if (engine == selectedEngine) "Selected" else "Not selected"
-                                        },
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    RadioButton(
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
+                                    .selectable(
                                         selected = (engine == selectedEngine),
-                                        onClick = null // TalkBack uses the Row semantic
+                                        onClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            selectedEngine = engine
+                                            prefs.edit().putString("active_engine", engine).apply()
+                                        },
+                                        role = Role.RadioButton
                                     )
-                                    Text(
-                                        text = engine,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        modifier = Modifier.padding(start = 16.dp)
-                                    )
-                                }
+                                    .semantics(mergeDescendants = true) {
+                                        // Merge the label + radio state into a single announcement so
+                                        // TalkBack says e.g. "Software Automatic Mouth, selected"
+                                        // rather than the row text, the radio control, and the state separately.
+                                        contentDescription = description
+                                    },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = (engine == selectedEngine),
+                                    onClick = null
+                                )
+                                Text(
+                                    text = engine,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier.padding(start = 16.dp)
+                                )
                             }
+                        }
                         }
                     }
                 }
@@ -224,22 +226,22 @@ class MainActivity : ComponentActivity() {
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         
-                        Text("Pitch: ${pitch.toInt()}%", modifier = Modifier.semantics { contentDescription = "Pitch slider, ${pitch.toInt()} percent" })
+                        Text("Pitch: ${pitch.toInt()}%")
                         Slider(
                             value = pitch,
                             onValueChange = { pitch = it },
                             valueRange = 50f..200f,
-                            modifier = Modifier.semantics { contentDescription = "Adjust Pitch" }
+                            modifier = Modifier.semantics { contentDescription = "Pitch" }
                         )
                         
                         Spacer(modifier = Modifier.height(8.dp))
                         
-                        Text("Speech Rate: ${speechRate.toInt()}%", modifier = Modifier.semantics { contentDescription = "Speech Rate slider, ${speechRate.toInt()} percent" })
+                        Text("Speech Rate: ${speechRate.toInt()}%")
                         Slider(
                             value = speechRate,
                             onValueChange = { speechRate = it },
                             valueRange = 50f..200f,
-                            modifier = Modifier.semantics { contentDescription = "Adjust Speech Rate" }
+                            modifier = Modifier.semantics { contentDescription = "Speech Rate" }
                         )
                     }
                 }
