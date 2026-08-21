@@ -37,26 +37,23 @@ const int TARGET_SAMPLE_RATE = 48000;
 static std::mutex g_synthMutex;
 static bool g_espeakInited = false;
 
-// Cubic Hermite Spline interpolation
-float cubicInterpolate(float y0, float y1, float y2, float y3, float mu) {
-    float a0, a1, a2, a3, mu2;
-    mu2 = mu * mu;
-    a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-    a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-    a2 = -0.5f * y0 + 0.5f * y2;
-    a3 = y1;
-    return (a0 * mu * mu2 + a1 * mu2 + a2 * mu + a3);
+// Windowed-sinc (Hann-windowed) resampler. Cleaner than cubic-Hermite followed by a 1-pole IIR:
+// the sinc kernel *is* the anti-imaging low-pass, bandlimiting to the source Nyquist so upsampling
+// to 48 kHz does not inject spurious high-frequency images.
+static const float PI = 3.14159265358979323846f;
+
+static float sinc(float x) {
+    if (x == 0.0f) return 1.0f;
+    float px = PI * x;
+    return sinf(px) / px;
 }
 
-// Low-pass filter (1-pole IIR) to remove aliasing harshness after upsampling
-void applyLowPassFilter(std::vector<int16_t>& samples, float alpha) {
-    if (samples.empty()) return;
-    float prev = samples[0];
-    for (size_t i = 1; i < samples.size(); ++i) {
-        float current = samples[i];
-        prev = prev + alpha * (current - prev);
-        samples[i] = static_cast<int16_t>(prev);
-    }
+// Hann-windowed sinc low-pass, cutoff at the source Nyquist (fc = 0.5 cycles/sample), spanning
+// [-halfLen, +halfLen] input samples. Returns 0 outside the support.
+static float sincKernel(float x, int halfLen) {
+    if (x < -static_cast<float>(halfLen) || x > static_cast<float>(halfLen)) return 0.0f;
+    float w = 0.5f - 0.5f * cosf(2.0f * PI * (x + static_cast<float>(halfLen)) / (2.0f * static_cast<float>(halfLen)));
+    return sinc(x) * w;
 }
 
 // Resample an engine's native PCM up to the target 48 kHz / 16-bit mono stream the
@@ -66,44 +63,41 @@ jbyteArray upscaleAndSmooth(JNIEnv* env, const void* inputData, int inputSamples
         return env->NewByteArray(0);
     }
 
+    // Convert source samples to a float buffer in signed 16-bit scale.
+    std::vector<float> src(inputSamplesCount);
     const uint8_t* in8 = static_cast<const uint8_t*>(inputData);
     const int16_t* in16 = static_cast<const int16_t*>(inputData);
+    for (int i = 0; i < inputSamplesCount; ++i) {
+        src[i] = is8Bit ? ((static_cast<float>(in8[i]) - 128.0f) * 256.0f) : static_cast<float>(in16[i]);
+    }
 
-    auto getSample = [&](int index) -> float {
-        if (index < 0) index = 0;
-        if (index >= inputSamplesCount) index = inputSamplesCount - 1;
-        if (is8Bit) {
-            return (static_cast<float>(in8[index]) - 128.0f) * 256.0f;
-        } else {
-            return static_cast<float>(in16[index]);
-        }
-    };
-
-    double ratio = static_cast<double>(sourceSampleRate) / TARGET_SAMPLE_RATE;
+    double ratio = static_cast<double>(sourceSampleRate) / TARGET_SAMPLE_RATE; // < 1 for upsampling
+    if (ratio <= 0.0) ratio = 1.0;
     int outputSamplesCount = static_cast<int>(inputSamplesCount / ratio);
     if (outputSamplesCount <= 0) outputSamplesCount = 1;
     std::vector<int16_t> outputBuffer(outputSamplesCount);
 
+    const int halfLen = 16; // 33-tap kernel: good stop-band for speech, cheap enough per utterance
+
+    auto clampIdx = [&](int k) -> int {
+        if (k < 0) return 0;
+        if (k >= inputSamplesCount) return inputSamplesCount - 1;
+        return k;
+    };
+
     for (int i = 0; i < outputSamplesCount; ++i) {
-        double position = i * ratio;
-        int idx = static_cast<int>(position);
-        float mu = static_cast<float>(position - idx);
-
-        float y0 = getSample(idx - 1);
-        float y1 = getSample(idx);
-        float y2 = getSample(idx + 1);
-        float y3 = getSample(idx + 2);
-
-        float interpolated = cubicInterpolate(y0, y1, y2, y3, mu);
-
-        if (interpolated > 32767.0f) interpolated = 32767.0f;
-        if (interpolated < -32768.0f) interpolated = -32768.0f;
-
-        outputBuffer[i] = static_cast<int16_t>(interpolated);
+        double pos = i * ratio;
+        int center = static_cast<int>(floor(pos));
+        float acc = 0.0f;
+        for (int k = -halfLen; k <= halfLen; ++k) {
+            int idx = center + k;
+            acc += src[clampIdx(idx)] * sincKernel(static_cast<float>(pos - idx), halfLen);
+        }
+        int v = static_cast<int>(lrintf(acc));
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        outputBuffer[i] = static_cast<int16_t>(v);
     }
-
-    float alpha = is8Bit ? 0.35f : (sourceSampleRate < 20000 ? 0.45f : 0.6f);
-    applyLowPassFilter(outputBuffer, alpha);
 
     // Peak-normalize instead of a fixed gain. A fixed gain clips any signal already near full
     // scale; normalization keeps loud sources safe while lifting quiet ones for consistent
