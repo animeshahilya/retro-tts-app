@@ -25,12 +25,18 @@ class RetroTtsService : TextToSpeechService() {
     }
 
     override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
-        // All bundled engines are English-only. Claim support for English, reject everything else
-        // so the framework falls back to a real multilingual engine instead of emitting English for
-        // e.g. a French utterance.
         if (lang == null) return TextToSpeech.LANG_NOT_SUPPORTED
         val l = lang.lowercase()
-        if (l == "eng" || l == "en") {
+        // eSpeak can serve any language whose voice file ships in espeak-ng-data/voices; SAM and
+        // DECtalk are English-only. We derive eSpeak's supported set from the unpacked data so a
+        // fuller voice pack (more languages) is unlocked automatically without code changes.
+        val supported = if (activeEngine == "ESPEAK" || activeEngine.startsWith("ESPEAK")) {
+            espeakLangs
+        } else {
+            setOf("en", "eng")
+        }
+        val base = if (l.length >= 2) l.substring(0, 2) else l
+        if (supported.contains(base) || supported.contains(l)) {
             return if (country == null || country.equals("USA", ignoreCase = true) || country.equals("GBR", ignoreCase = true)) {
                 TextToSpeech.LANG_COUNTRY_AVAILABLE
             } else {
@@ -64,6 +70,14 @@ class RetroTtsService : TextToSpeechService() {
         val prefs = getSharedPreferences("retro_tts_prefs", Context.MODE_PRIVATE)
         activeEngine = prefs.getString("active_engine", "SAM") ?: "SAM"
 
+        // Migrate legacy "ESPEAK (variant)" engine keys to the unified ESPEAK engine + espeak_voice pref.
+        if (activeEngine.startsWith("ESPEAK") && activeEngine != "ESPEAK") {
+            val v = activeEngine.removePrefix("ESPEAK").trim().removeSurrounding("(", ")")
+            prefs.edit().putString("espeak_voice", "en+$v").apply()
+            prefs.edit().putString("active_engine", "ESPEAK").apply()
+            activeEngine = "ESPEAK"
+        }
+
         // All engines are normalized to 48 kHz / 16-bit mono by the native layer.
         val sampleRate = 48000
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
@@ -78,21 +92,13 @@ class RetroTtsService : TextToSpeechService() {
                 synthSam(text, pitch, speechRate)
             } else if (activeEngine == "DECTALK") {
                 synthDectalk(text, pitch, speechRate)
-            } else if (activeEngine.startsWith("ESPEAK")) {
-                val variant = when (activeEngine) {
-                    "ESPEAK (whisper)" -> "en+whisper"
-                    "ESPEAK (croak)" -> "en+croak"
-                    "ESPEAK (klatt)" -> "en+klatt"
-                    "ESPEAK (m1)" -> "en+m1"
-                    "ESPEAK (f1)" -> "en+f1"
-                    "ESPEAK (robosoft)" -> "en+robosoft"
-                    "ESPEAK (robosoft8)" -> "en+robosoft8"
-                    "ESPEAK (yelling)" -> "en+yelling"
-                    else -> "en"
-                }
+            } else if (activeEngine == "ESPEAK" || activeEngine.startsWith("ESPEAK")) {
+                // Use the user-selected eSpeak voice (default "en"); variant picks like
+                // "en+robosoft" or a full language voice such as "fr" unlock more voices.
+                val voice = prefs.getString("espeak_voice", "en") ?: "en"
                 // Pass the files dir (which contains espeak-ng-data), NOT a non-existent
                 // "espeakdata" subdir. A wrong path makes espeak_Initialize fail.
-                synthEspeak(text, filesDir.absolutePath, variant, pitch, speechRate)
+                synthEspeak(text, filesDir.absolutePath, voice, pitch, speechRate)
             } else {
                 ByteArray(0)
             }
@@ -126,6 +132,21 @@ class RetroTtsService : TextToSpeechService() {
     private external fun synthDectalk(text: String, pitch: Int, speechRate: Int): ByteArray
     private external fun synthEspeak(text: String, dataPath: String, voiceName: String, pitch: Int, speechRate: Int): ByteArray
     private external fun cancelSynth()
+
+    // Languages eSpeak can actually speak, derived from the unpacked voice files so the set grows
+    // automatically when a voice pack with more languages is supplied. Computed once.
+    private val espeakLangs: Set<String> by lazy {
+        val dir = File(filesDir, "espeak-ng-data/voices")
+        val langs = mutableSetOf<String>()
+        dir.listFiles()?.forEach { f ->
+            if (f.isFile) {
+                val name = f.name.lowercase()
+                if (name.length >= 2) langs.add(name.substring(0, 2))
+            }
+        }
+        if (langs.isEmpty()) langs.add("en")
+        langs
+    }
 
     companion object {
         init {
