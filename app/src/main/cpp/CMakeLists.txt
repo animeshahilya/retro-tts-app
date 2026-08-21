@@ -7,6 +7,22 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -flto -ffast-math -funroll-loops -fo
 set(DECTALKMINI_NO_CHARSET ON CACHE BOOL "Disable charset conversion" FORCE)
 set(DECTALKMINI_NO_FILESYSTEM ON CACHE BOOL "Disable filesystem" FORCE)
 set(DECTALKMINI_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
+
+# DECtalkMini's CMakeLists.txt requires CMake >= 3.25, but the NDK toolchain ships 3.22.1.
+# Relax it to match our toolchain so a fresh submodule checkout builds without manual edits.
+set(DECTALK_CMAKE ${CMAKE_CURRENT_SOURCE_DIR}/dectalk_repo/CMakeLists.txt)
+if(EXISTS ${DECTALK_CMAKE})
+    file(READ ${DECTALK_CMAKE} _dectalk_cmake)
+    string(REGEX REPLACE "cmake_minimum_required\\(VERSION [0-9.]+\\)"
+           "cmake_minimum_required(VERSION 3.22.1)" _dectalk_cmake_patched ${_dectalk_cmake})
+    if(NOT _dectalk_cmake_patched STREQUAL _dectalk_cmake)
+        file(WRITE ${DECTALK_CMAKE} ${_dectalk_cmake_patched})
+    endif()
+else()
+    message(FATAL_ERROR
+        "dectalk_repo submodule not found. Run: git submodule update --init --recursive")
+endif()
+
 add_subdirectory(dectalk_repo)
 
 set(SAM_SOURCES

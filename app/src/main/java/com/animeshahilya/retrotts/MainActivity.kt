@@ -41,8 +41,10 @@ class MainActivity : ComponentActivity() {
         
         System.loadLibrary("retro-tts")
 
-        // Unpack espeakdata.zip always to get new variants
-        unpackEspeakData(this)
+        // Unpack espeak data once (zip contents land under filesDir/espeak-ng-data).
+        if (!File(filesDir, "espeak-ng-data").exists()) {
+            unpackEspeakData(this)
+        }
 
         setContent {
             MaterialTheme {
@@ -295,6 +297,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         fun unpackEspeakData(context: Context) {
             try {
+                if (File(context.filesDir, "espeak-ng-data").exists()) return
                 val resId = context.resources.getIdentifier("espeakdata", "raw", context.packageName)
                 if (resId == 0) return
                 val inputStream = context.resources.openRawResource(resId)
