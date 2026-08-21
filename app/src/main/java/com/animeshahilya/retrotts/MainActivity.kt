@@ -40,19 +40,25 @@ import java.util.zip.ZipInputStream
 // (e.g. "en", "en+robosoft", "fr"); `label` is the human-readable name.
 data class EspeakVoice(val id: String, val label: String)
 
-// Enumerate the eSpeak voices that actually shipped in espeak-ng-data/voices. Top-level files are
-// base-language voices; the !v directory holds the many named/retro variant voices. The list is
-// derived from the unpacked data so a fuller voice pack unlocks more entries automatically.
+// Enumerate the eSpeak voices present in the unpacked espeak-ng-data. Language voices live under
+// lang/<family>/<code> (e.g. lang/roa/fr); the !v directory holds the many named "retro" variant
+// voices (selected as en+<variant>). The list is derived from the data, so a fuller voice pack
+// (more languages) is unlocked automatically without code changes.
 fun loadEspeakVoices(context: Context): List<EspeakVoice> {
-    val voicesDir = File(context.filesDir, "espeak-ng-data/voices")
-    if (!voicesDir.isDirectory) return listOf(EspeakVoice("en", "English (default)"))
+    val dataDir = File(context.filesDir, "espeak-ng-data")
+    if (!dataDir.isDirectory) return listOf(EspeakVoice("en", "English (default)"))
     val voices = mutableListOf<EspeakVoice>()
-    voicesDir.listFiles()?.filter { it.isFile }?.map { it.name }?.sorted()?.forEach { lang ->
-        voices.add(EspeakVoice(lang, lang))
+    // Language voices: lang/<family>/<code>
+    val langDir = File(dataDir, "lang")
+    langDir.listFiles()?.filter { it.isDirectory }?.forEach { family ->
+        family.listFiles()?.filter { it.isFile }?.forEach { f ->
+            voices.add(EspeakVoice(f.name, f.name))
+        }
     }
-    val variantsDir = File(voicesDir, "!v")
+    // Retro/robot variant voices: voices/!v (selected as en+<variant>)
+    val variantsDir = File(File(dataDir, "voices"), "!v")
     variantsDir.listFiles()?.filter { it.isFile }?.map { it.name }?.sorted()?.forEach { v ->
-        voices.add(EspeakVoice("en+$v", "English + $v"))
+        voices.add(EspeakVoice("en+$v", "en + $v"))
     }
     if (voices.isEmpty()) voices.add(EspeakVoice("en", "English (default)"))
     return voices

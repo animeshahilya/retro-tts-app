@@ -136,14 +136,19 @@ class RetroTtsService : TextToSpeechService() {
     // Languages eSpeak can actually speak, derived from the unpacked voice files so the set grows
     // automatically when a voice pack with more languages is supplied. Computed once.
     private val espeakLangs: Set<String> by lazy {
-        val dir = File(filesDir, "espeak-ng-data/voices")
+        val dir = File(filesDir, "espeak-ng-data")
         val langs = mutableSetOf<String>()
-        dir.listFiles()?.forEach { f ->
-            if (f.isFile) {
-                val name = f.name.lowercase()
-                if (name.length >= 2) langs.add(name.substring(0, 2))
+        // Language voices live under lang/<family>/<code>; collect their 2-letter codes.
+        File(dir, "lang").listFiles()?.forEach { family ->
+            if (family.isDirectory) {
+                family.listFiles()?.filter { it.isFile }?.forEach { f ->
+                    val code = f.name.lowercase()
+                    if (code.length >= 2) langs.add(code.substring(0, 2))
+                }
             }
         }
+        // Variant voices (!v) are English-based; ensure "en" is reported.
+        File(File(dir, "voices"), "!v").listFiles()?.filter { it.isFile }?.forEach { langs.add("en") }
         if (langs.isEmpty()) langs.add("en")
         langs
     }
