@@ -494,6 +494,20 @@ jbyteArray doSynthOpenevv(JNIEnv* env, jstring text, jint voiceIndex, jint pitch
     return result;
 }
 
+jbyteArray doSynthSp0256(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
+    int spPitch = pitch - 12;
+    if (spPitch < 10) spPitch = 10;
+    if (spPitch > 200) spPitch = 200;
+    return doSynthSam(env, text, spPitch, speechRate);
+}
+
+jbyteArray doSynthVotrax(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
+    int vPitch = pitch + 12;
+    if (vPitch < 10) vPitch = 10;
+    if (vPitch > 200) vPitch = 200;
+    return doSynthSam(env, text, vPitch, speechRate);
+}
+
 void doCancelEspeak() {
     if (g_espeakInited) espeak_Cancel();
 }
@@ -523,6 +537,14 @@ extern "C" {
         std::lock_guard<std::mutex> lock(g_synthMutex);
         return doSynthOpenevv(env, text, voiceIndex, pitch, speechRate);
     }
+    JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_MainActivity_synthSp0256(JNIEnv* env, jobject, jstring text, jint pitch, jint speechRate) {
+        std::lock_guard<std::mutex> lock(g_synthMutex);
+        return doSynthSp0256(env, text, pitch, speechRate);
+    }
+    JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_MainActivity_synthVotrax(JNIEnv* env, jobject, jstring text, jint pitch, jint speechRate) {
+        std::lock_guard<std::mutex> lock(g_synthMutex);
+        return doSynthVotrax(env, text, pitch, speechRate);
+    }
 
     // RetroTtsService bindings
     JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_synthSam(JNIEnv* env, jobject, jstring text, jint pitch, jint speechRate) {
@@ -540,6 +562,14 @@ extern "C" {
     JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_synthOpenevv(JNIEnv* env, jobject, jstring text, jint voiceIndex, jint pitch, jint speechRate) {
         std::lock_guard<std::mutex> lock(g_synthMutex);
         return doSynthOpenevv(env, text, voiceIndex, pitch, speechRate);
+    }
+    JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_synthSp0256(JNIEnv* env, jobject, jstring text, jint pitch, jint speechRate) {
+        std::lock_guard<std::mutex> lock(g_synthMutex);
+        return doSynthSp0256(env, text, pitch, speechRate);
+    }
+    JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_synthVotrax(JNIEnv* env, jobject, jstring text, jint pitch, jint speechRate) {
+        std::lock_guard<std::mutex> lock(g_synthMutex);
+        return doSynthVotrax(env, text, pitch, speechRate);
     }
 
     // Lock-free instant cancellation for TalkBack responsiveness

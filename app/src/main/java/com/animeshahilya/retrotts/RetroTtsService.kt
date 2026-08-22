@@ -8,6 +8,9 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeechService
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class RetroTtsService : TextToSpeechService() {
 
@@ -16,11 +19,14 @@ class RetroTtsService : TextToSpeechService() {
 
     override fun onCreate() {
         super.onCreate()
-        // Unpack espeak data once. The zip top-level directory is "espeak-ng-data", so gate on
-        // that path (not the previously-used bogus "espeakdata" directory).
+        // Unpack off the main thread — MainActivity.unpackEspeakData does ZipInputStream over
+        // the bundled R.raw.espeakdata (MBs of small files) plus deleteRecursively, which blocks
+        // the main thread for seconds on a fresh install and ANRs the service bind.
         val espeakDataPath = File(filesDir, "espeak-ng-data")
         if (!espeakDataPath.exists()) {
-            MainActivity.unpackEspeakData(this)
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                try { MainActivity.unpackEspeakData(this@RetroTtsService) } catch (_: Exception) {}
+            }
         }
     }
 
@@ -102,6 +108,10 @@ class RetroTtsService : TextToSpeechService() {
             } else if (activeEngine == "OPENEVV") {
                 val voice = prefs.getInt("openevv_voice", 1)
                 synthOpenevv(text, voice, pitch, speechRate)
+            } else if (activeEngine == "SP0256") {
+                synthSp0256(text, pitch, speechRate)
+            } else if (activeEngine == "VOTRAX") {
+                synthVotrax(text, pitch, speechRate)
             } else {
                 ByteArray(0)
             }
@@ -142,6 +152,8 @@ class RetroTtsService : TextToSpeechService() {
     private external fun synthDectalk(text: String, pitch: Int, speechRate: Int): ByteArray
     private external fun synthEspeak(text: String, dataPath: String, voiceName: String, pitch: Int, speechRate: Int): ByteArray
     private external fun synthOpenevv(text: String, voice: Int, pitch: Int, speechRate: Int): ByteArray
+    private external fun synthSp0256(text: String, pitch: Int, speechRate: Int): ByteArray
+    private external fun synthVotrax(text: String, pitch: Int, speechRate: Int): ByteArray
     private external fun cancelSynth()
 
     // Languages eSpeak can actually speak, derived from the unpacked voice files so the set grows
