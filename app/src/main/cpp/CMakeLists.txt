@@ -32,12 +32,25 @@ set(SAM_SOURCES
     sam_repo/src/debug.c
 )
 
-add_library(retro-tts SHARED native-lib.cpp ${SAM_SOURCES})
+file(GLOB OPENEVV_SRC_SOURCES "openevv_repo/src/*.c")
+list(FILTER OPENEVV_SRC_SOURCES EXCLUDE REGEX ".*port_win32\\.c$")
+file(GLOB OPENEVV_LANG_SOURCES "openevv_repo/lang/enus/*.c")
+set(OPENEVV_SOURCES ${OPENEVV_SRC_SOURCES} ${OPENEVV_LANG_SOURCES})
+
+add_library(retro-tts SHARED native-lib.cpp ${SAM_SOURCES} ${OPENEVV_SOURCES})
+
+target_compile_definitions(retro-tts PRIVATE EVV_ARENA=1)
 
 add_library(espeak SHARED IMPORTED)
 set_target_properties(espeak PROPERTIES IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libttsespeak.so)
 
-target_include_directories(retro-tts PRIVATE sam_repo/src dectalk_repo/include ../../../../../espeak-ng/src/include)
+target_include_directories(retro-tts PRIVATE 
+    sam_repo/src 
+    dectalk_repo/include 
+    ../../../../../espeak-ng/src/include
+    openevv_repo/src
+    openevv_repo/lang/enus
+)
 
 find_library(log-lib log)
 

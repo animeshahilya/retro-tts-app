@@ -40,10 +40,20 @@ import java.util.zip.ZipInputStream
 // (e.g. "en", "en+robosoft", "fr"); `label` is the human-readable name.
 data class EspeakVoice(val id: String, val label: String)
 
-// Enumerate the eSpeak voices present in the unpacked espeak-ng-data. Language voices live under
-// lang/<family>/<code> (e.g. lang/roa/fr); the !v directory holds the many named "retro" variant
-// voices (selected as en+<variant>). The list is derived from the data, so a fuller voice pack
-// (more languages) is unlocked automatically without code changes.
+// 8 classic formant voice presets of IBM Embedded ViaVoice / Eloquence (openevv)
+data class EloquenceVoice(val id: Int, val name: String, val description: String)
+
+val eloquenceVoices = listOf(
+    EloquenceVoice(1, "Reed", "Adult Male 1 (Default)"),
+    EloquenceVoice(2, "Shelley", "Adult Female 1"),
+    EloquenceVoice(3, "Bobby", "Child"),
+    EloquenceVoice(4, "Glen", "Adult Male 2"),
+    EloquenceVoice(5, "Sandy", "Adult Female 2"),
+    EloquenceVoice(6, "Grandma", "Elderly Female"),
+    EloquenceVoice(7, "Grandpa", "Elderly Male"),
+    EloquenceVoice(8, "Rocko", "Male Character")
+)
+
 // Enumerate the eSpeak voices present in the unpacked espeak-ng-data. Language voices live under
 // lang/<family>/<code> (e.g. lang/roa/fr); the !v directory holds the many named "retro" variant
 // voices (selected as en+<variant>). The list is derived from the data, so a fuller voice pack
@@ -76,9 +86,11 @@ class MainActivity : ComponentActivity() {
         
         System.loadLibrary("retro-tts")
 
-        // Unpack espeak data once (zip contents land under filesDir/espeak-ng-data).
-        if (!File(filesDir, "espeak-ng-data").exists()) {
-            unpackEspeakData(this)
+        // Unpack espeak data asynchronously on IO thread if not already unpacked
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            if (!File(filesDir, "espeak-ng-data").exists()) {
+                unpackEspeakData(this@MainActivity)
+            }
         }
 
         setContent {
@@ -91,6 +103,7 @@ class MainActivity : ComponentActivity() {
     external fun synthSam(text: String, pitch: Int, speechRate: Int): ByteArray
     external fun synthDectalk(text: String, pitch: Int, speechRate: Int): ByteArray
     external fun synthEspeak(text: String, dataPath: String, voiceName: String, pitch: Int, speechRate: Int): ByteArray
+    external fun synthOpenevv(text: String, voice: Int, pitch: Int, speechRate: Int): ByteArray
 
     @Composable
     fun TTSApp(dataPath: String) {
@@ -100,6 +113,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("retro_tts_prefs", Context.MODE_PRIVATE)
         var selectedEngine by remember { mutableStateOf(prefs.getString("active_engine", "SAM") ?: "SAM") }
         var espeakVoice by remember { mutableStateOf(prefs.getString("espeak_voice", "en") ?: "en") }
+        var openevvVoice by remember { mutableStateOf(prefs.getInt("openevv_voice", 1)) }
 
         // Migrate legacy "ESPEAK (variant)" engine keys to the unified ESPEAK engine + espeak_voice pref.
         if (selectedEngine.startsWith("ESPEAK") && selectedEngine != "ESPEAK") {
@@ -146,6 +160,9 @@ class MainActivity : ComponentActivity() {
                                     playAudio(pcm, 48000, AudioFormat.ENCODING_PCM_16BIT)
                                 } else if (selectedEngine.startsWith("ESPEAK")) {
                                     val pcm = synthEspeak(text, dataPath, espeakVoice, p, r)
+                                    playAudio(pcm, 48000, AudioFormat.ENCODING_PCM_16BIT)
+                                } else if (selectedEngine == "OPENEVV") {
+                                    val pcm = synthOpenevv(text, openevvVoice, p, r)
                                     playAudio(pcm, 48000, AudioFormat.ENCODING_PCM_16BIT)
                                 }
                             } finally {
@@ -206,7 +223,8 @@ class MainActivity : ComponentActivity() {
                             val engines = listOf(
                                 "SAM" to "Software Automatic Mouth",
                                 "DECTALK" to "DECtalk (Perfect Paul)",
-                                "ESPEAK" to "eSpeak NG"
+                                "ESPEAK" to "eSpeak NG",
+                                "OPENEVV" to "Eloquence (IBM ViaVoice)"
                             )
                             engines.forEach { (engine, description) ->
                                 Row(
@@ -235,10 +253,60 @@ class MainActivity : ComponentActivity() {
                                         onClick = null
                                     )
                                     Text(
-                                        text = engine,
+                                        text = if (engine == "OPENEVV") "Eloquence (ViaVoice)" else engine,
                                         style = MaterialTheme.typography.bodyLarge,
                                         modifier = Modifier.padding(start = 16.dp)
                                     )
+                                }
+                            }
+                        }
+
+                        // Eloquence voice list: 8 classic formant voice presets. Selection stored in `openevv_voice`.
+                        if (selectedEngine == "OPENEVV") {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                "Eloquence Voice",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.semantics { heading() }
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(260.dp)
+                                    .selectableGroup()
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.small)
+                            ) {
+                                items(eloquenceVoices) { voice ->
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .selectable(
+                                                selected = (voice.id == openevvVoice),
+                                                onClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    openevvVoice = voice.id
+                                                    prefs.edit().putInt("openevv_voice", voice.id).apply()
+                                                },
+                                                role = Role.RadioButton
+                                            )
+                                            .semantics(mergeDescendants = true) {
+                                                contentDescription = "${voice.name}, ${voice.description}"
+                                            },
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        RadioButton(
+                                            selected = (voice.id == openevvVoice),
+                                            onClick = null
+                                        )
+                                        Text(
+                                            text = "${voice.name} (${voice.description})",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            modifier = Modifier.padding(start = 16.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -371,10 +439,22 @@ class MainActivity : ComponentActivity() {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
             
-        audioTrack.play()
-        audioTrack.write(pcmData, 0, pcmData.size)
-        audioTrack.stop()
-        audioTrack.release()
+        try {
+            audioTrack.play()
+            audioTrack.write(pcmData, 0, pcmData.size)
+            // Wait for audio track to finish playback to prevent clipping the tail
+            val durationMs = (pcmData.size.toLong() * 1000L) / (sampleRate * 2L)
+            Thread.sleep((durationMs + 60L).coerceAtLeast(60L))
+            audioTrack.stop()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            try {
+                audioTrack.release()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
     }
 
     companion object {

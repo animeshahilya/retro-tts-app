@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <map>
 #include <mutex>
+#include <atomic>
 
 extern "C" {
     #include "reciter.h"
@@ -27,6 +28,41 @@ extern "C" {
     void espeak_Cancel(void);
     // SAM references this global; provide a single definition so the native lib links.
     int debug = 0;
+
+    // Minimal openevv (Eloquence) API surface
+    typedef struct OldInst OldInst;
+    enum ECIMessage { eciWaveformBuffer = 0, eciPhonemeBuffer = 1, eciIndexReply = 2 };
+    enum ECICallbackReturn { eciDataNotProcessed = 0, eciDataProcessed = 1, eciDataAbort = 2 };
+    enum { EVV_P_REAL_WORLD_UNITS = 8 };
+    enum { EVV_V_GENDER = 0, EVV_V_HEAD_SIZE = 1, EVV_V_PITCH = 2, EVV_V_FLUCTUATION = 3, EVV_V_ROUGHNESS = 4,
+           EVV_V_BREATHINESS = 5, EVV_V_SPEED = 6, EVV_V_VOLUME = 7, EVV_V_COUNT = 8 };
+
+    #if defined(_WIN32)
+    #define STDCALL __attribute__((stdcall))
+    #else
+    #define STDCALL
+    #endif
+
+    OldInst *STDCALL eo_new(void);
+    OldInst *STDCALL eo_newEx(int32_t language);
+    int      STDCALL es_delete(OldInst *h);
+    int      STDCALL et_addText(OldInst *h, const char *text);
+    int      STDCALL et_synthesize(OldInst *h);
+    int      STDCALL ev_setOutputBuffer(OldInst *h, int32_t n, void *buf);
+    int32_t  STDCALL ev_setParam(OldInst *h, int32_t which, int32_t value);
+    int32_t  STDCALL vc_getVoiceParam(OldInst *h, int32_t voice, int32_t which);
+    int      STDCALL vc_setVoiceParam(OldInst *h, int32_t voice, int32_t which, int32_t value);
+    int      STDCALL vc_copyVoice(OldInst *h, int32_t from, int32_t to);
+    void     STDCALL eo_registerCallback(OldInst *h, void *cb, void *data);
+    void     STDCALL eo_synchronizeSynth(OldInst *h);
+    int      STDCALL eo_speaking(OldInst *h);
+    int      STDCALL eo_stop(OldInst *h);
+    int      STDCALL eo_getAvailableLanguages(uint32_t *out, int *count);
+
+    void evvRunStaticInitialisers(void);
+    void evv_port_start(void);
+    void evv_port_finish(void);
+    void evv_sleep_ms(int ms);
 }
 
 const int TARGET_SAMPLE_RATE = 48000;
@@ -87,68 +123,129 @@ static const std::vector<float>& getFilterBank(int sourceRate) {
 // Resample an engine's native PCM up to the target 48 kHz / 16-bit mono stream the
 // Android AudioTrack consumes. is8Bit selects unsigned 8-bit (SAM) vs signed 16-bit.
 jbyteArray upscaleAndSmooth(JNIEnv* env, const void* inputData, int inputSamplesCount, int sourceSampleRate, bool is8Bit) {
-    if (inputSamplesCount <= 0) {
+    if (inputSamplesCount <= 0 || !inputData) {
         return env->NewByteArray(0);
-    }
-
-    // Convert source samples to a float buffer in signed 16-bit scale.
-    std::vector<float> src(inputSamplesCount);
-    const uint8_t* in8 = static_cast<const uint8_t*>(inputData);
-    const int16_t* in16 = static_cast<const int16_t*>(inputData);
-    for (int i = 0; i < inputSamplesCount; ++i) {
-        src[i] = is8Bit ? ((static_cast<float>(in8[i]) - 128.0f) * 256.0f) : static_cast<float>(in16[i]);
     }
 
     double ratio = static_cast<double>(sourceSampleRate) / TARGET_SAMPLE_RATE; // < 1 for upsampling
     if (ratio <= 0.0) ratio = 1.0;
     int outputSamplesCount = static_cast<int>(inputSamplesCount / ratio);
     if (outputSamplesCount <= 0) outputSamplesCount = 1;
+
+    // Fast conversion to float buffer
+    std::vector<float> src(inputSamplesCount);
+    const uint8_t* in8 = static_cast<const uint8_t*>(inputData);
+    const int16_t* in16 = static_cast<const int16_t*>(inputData);
+    if (is8Bit) {
+        for (int i = 0; i < inputSamplesCount; ++i) {
+            src[i] = (static_cast<float>(in8[i]) - 128.0f) * 256.0f;
+        }
+    } else {
+        for (int i = 0; i < inputSamplesCount; ++i) {
+            src[i] = static_cast<float>(in16[i]);
+        }
+    }
+
     std::vector<int16_t> outputBuffer(outputSamplesCount);
-
     const std::vector<float>& bank = getFilterBank(sourceSampleRate);
-    const int stride = 2 * RESAMPLER_HALF + 1;
+    const int stride = 2 * RESAMPLER_HALF + 1; // 33 taps
 
-    auto clampIdx = [&](int k) -> int {
-        if (k < 0) return 0;
-        if (k >= inputSamplesCount) return inputSamplesCount - 1;
-        return k;
-    };
+    int peak = 0;
+    int i = 0;
 
-    for (int i = 0; i < outputSamplesCount; ++i) {
+    // 1) Leading edge: center < RESAMPLER_HALF
+    for (; i < outputSamplesCount; ++i) {
         double pos = i * ratio;
-        int center = static_cast<int>(floor(pos));
+        int center = static_cast<int>(pos);
+        if (center >= RESAMPLER_HALF) break;
+
         float frac = static_cast<float>(pos - center);
         int p = static_cast<int>(frac * RESAMPLER_PHASES) % RESAMPLER_PHASES;
         if (p < 0) p += RESAMPLER_PHASES;
         const float* w = &bank[p * stride];
         float acc = 0.0f;
         for (int k = -RESAMPLER_HALF; k <= RESAMPLER_HALF; ++k) {
-            acc += src[clampIdx(center + k)] * w[k + RESAMPLER_HALF];
+            int idx = center + k;
+            if (idx < 0) idx = 0;
+            else if (idx >= inputSamplesCount) idx = inputSamplesCount - 1;
+            acc += src[idx] * w[k + RESAMPLER_HALF];
         }
         int v = static_cast<int>(lrintf(acc));
         if (v > 32767) v = 32767;
-        if (v < -32768) v = -32768;
+        else if (v < -32768) v = -32768;
         outputBuffer[i] = static_cast<int16_t>(v);
-    }
-
-    // Peak-normalize instead of a fixed gain. A fixed gain clips any signal already near full
-    // scale; normalization keeps loud sources safe while lifting quiet ones for consistent
-    // loudness. We only attenuate when clipping would occur, and cap any boost so near-silent
-    // audio (mostly noise floor) is not amplified into harsh artifacts.
-    const int targetPeak = 30000; // ~ -0.8 dBFS, leaves headroom
-    int peak = 0;
-    for (int i = 0; i < outputSamplesCount; ++i) {
-        int a = outputBuffer[i] < 0 ? -outputBuffer[i] : outputBuffer[i];
+        int a = v < 0 ? -v : v;
         if (a > peak) peak = a;
     }
-    if (peak > 0) {
+
+    // 2) Interior bulk: branch-free, auto-vectorizable (NEON / SIMD)
+    int interiorEnd = outputSamplesCount;
+    for (int j = outputSamplesCount - 1; j >= i; --j) {
+        double pos = j * ratio;
+        int center = static_cast<int>(pos);
+        if (center + RESAMPLER_HALF < inputSamplesCount) {
+            interiorEnd = j + 1;
+            break;
+        }
+    }
+
+    for (; i < interiorEnd; ++i) {
+        double pos = i * ratio;
+        int center = static_cast<int>(pos);
+        float frac = static_cast<float>(pos - center);
+        int p = static_cast<int>(frac * RESAMPLER_PHASES) % RESAMPLER_PHASES;
+        if (p < 0) p += RESAMPLER_PHASES;
+        const float* w = &bank[p * stride];
+        const float* s = &src[center - RESAMPLER_HALF];
+
+        float acc = 0.0f;
+        #pragma clang loop vectorize(enable)
+        for (int k = 0; k < stride; ++k) {
+            acc += s[k] * w[k];
+        }
+        int v = static_cast<int>(lrintf(acc));
+        if (v > 32767) v = 32767;
+        else if (v < -32768) v = -32768;
+        outputBuffer[i] = static_cast<int16_t>(v);
+        int a = v < 0 ? -v : v;
+        if (a > peak) peak = a;
+    }
+
+    // 3) Trailing edge: center + RESAMPLER_HALF >= inputSamplesCount
+    for (; i < outputSamplesCount; ++i) {
+        double pos = i * ratio;
+        int center = static_cast<int>(pos);
+        float frac = static_cast<float>(pos - center);
+        int p = static_cast<int>(frac * RESAMPLER_PHASES) % RESAMPLER_PHASES;
+        if (p < 0) p += RESAMPLER_PHASES;
+        const float* w = &bank[p * stride];
+        float acc = 0.0f;
+        for (int k = -RESAMPLER_HALF; k <= RESAMPLER_HALF; ++k) {
+            int idx = center + k;
+            if (idx < 0) idx = 0;
+            else if (idx >= inputSamplesCount) idx = inputSamplesCount - 1;
+            acc += src[idx] * w[k + RESAMPLER_HALF];
+        }
+        int v = static_cast<int>(lrintf(acc));
+        if (v > 32767) v = 32767;
+        else if (v < -32768) v = -32768;
+        outputBuffer[i] = static_cast<int16_t>(v);
+        int a = v < 0 ? -v : v;
+        if (a > peak) peak = a;
+    }
+
+    // Peak-normalize headroom (~ -0.8 dBFS)
+    const int targetPeak = 30000;
+    if (peak > 0 && peak != targetPeak) {
         float scale = static_cast<float>(targetPeak) / peak;
         if (scale > 4.0f) scale = 4.0f; // cap boost for very quiet sources
-        for (int i = 0; i < outputSamplesCount; ++i) {
-            float val = outputBuffer[i] * scale;
-            if (val > 32767.0f) val = 32767.0f;
-            if (val < -32768.0f) val = -32768.0f;
-            outputBuffer[i] = static_cast<int16_t>(val);
+        if (std::abs(scale - 1.0f) > 0.05f) {
+            for (int k = 0; k < outputSamplesCount; ++k) {
+                float val = outputBuffer[k] * scale;
+                if (val > 32767.0f) val = 32767.0f;
+                else if (val < -32768.0f) val = -32768.0f;
+                outputBuffer[k] = static_cast<int16_t>(val);
+            }
         }
     }
 
@@ -163,16 +260,20 @@ jbyteArray doSynthSam(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
     const char *nativeString = env->GetStringUTFChars(text, 0);
     if (!nativeString) return env->NewByteArray(0);
 
-    // Buffer must hold the input text (fully upper-cased, 1:1 with phoneme codes) plus the
-    // terminating 0x9b marker. Original code used 256 bytes and strcat'd 0x9b past a 255-char
-    // copy, overrunning the buffer by one byte. Size generously and bound every write.
+    size_t len = strlen(nativeString);
+    if (len == 0) {
+        env->ReleaseStringUTFChars(text, nativeString);
+        return env->NewByteArray(0);
+    }
+
     unsigned char input[2048];
     memset(input, 0, sizeof(input));
-    strncpy((char*)input, nativeString, sizeof(input) - 2);
-    ((char*)input)[sizeof(input) - 2] = '\0';
+    if (len > sizeof(input) - 4) len = sizeof(input) - 4;
+    memcpy(input, nativeString, len);
+    input[len] = '\0';
 
-    for (int i = 0; input[i] != 0; i++) {
-        input[i] = (unsigned char)toupper((unsigned char)input[i]);
+    for (int k = 0; input[k] != 0; k++) {
+        input[k] = (unsigned char)toupper((unsigned char)input[k]);
     }
 
     TextToPhonemes(input);
@@ -181,12 +282,10 @@ jbyteArray doSynthSam(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
     SetInput((char*)input);
 
     // Default SAM: pitch = 64, speed = 72
-    // Lower pitch value = higher voice in SAM
     int samPitch = 64 * 100 / (pitch > 0 ? pitch : 100);
     if (samPitch < 0) samPitch = 0;
     if (samPitch > 255) samPitch = 255;
 
-    // Lower speed value = faster voice in SAM
     int samSpeed = 72 * 100 / (speechRate > 0 ? speechRate : 100);
     if (samSpeed < 0) samSpeed = 0;
     if (samSpeed > 255) samSpeed = 255;
@@ -207,6 +306,7 @@ jbyteArray doSynthSam(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
 
 // ================= DECtalk Core =================
 static std::vector<short> dectalk_buffer;
+static bool g_dectalkInited = false;
 
 short* dectalk_callback(short* wav, long numsamples, int events) {
     if (numsamples > 0 && wav != nullptr) {
@@ -215,13 +315,19 @@ short* dectalk_callback(short* wav, long numsamples, int events) {
     return wav;
 }
 
+static void ensureDectalk() {
+    if (!g_dectalkInited) {
+        TextToSpeechInit(dectalk_callback, nullptr);
+        g_dectalkInited = true;
+    }
+}
+
 jbyteArray doSynthDectalk(JNIEnv* env, jstring text, jint pitch, jint speechRate) {
     const char *nativeString = env->GetStringUTFChars(text, 0);
     if (!nativeString) return env->NewByteArray(0);
 
+    ensureDectalk();
     dectalk_buffer.clear();
-
-    TextToSpeechInit(dectalk_callback, nullptr);
 
     // DECtalk defaults: rate = 180, ap = 122
     int dtRate = 180 * (speechRate > 0 ? speechRate : 100) / 100;
@@ -230,8 +336,6 @@ jbyteArray doSynthDectalk(JNIEnv* env, jstring text, jint pitch, jint speechRate
     int dtPitch = 122 * (pitch > 0 ? pitch : 100) / 100;
     TextToSpeechSetVoiceParam("ap", dtPitch);
 
-    // Long TalkBack utterances were silently truncated at 1024 bytes. Use a larger buffer
-    // and forward the whole string, not just the first 1023 characters.
     char inputBuf[8192];
     memset(inputBuf, 0, sizeof(inputBuf));
     strncpy(inputBuf, nativeString, sizeof(inputBuf) - 1);
@@ -257,10 +361,6 @@ static int espeak_callback(short *wav, int numsamples, int events) {
     return 0; // 0 continues synthesis
 }
 
-// Initialize eSpeak exactly once. The data path must point at the directory that *contains*
-// espeak-ng-data (i.e. the app files dir). espeakINITIALIZE_DONT_EXIT prevents the library from
-// calling exit(1) on a missing-data-path failure, which would otherwise kill the whole app
-// process (and with it any TalkBack session using this engine).
 static bool ensureEspeak(const char* path) {
     if (g_espeakInited) return true;
     int sr = espeak_Initialize(1, 0, path, espeakINITIALIZE_DONT_EXIT);
@@ -310,16 +410,101 @@ jbyteArray doSynthEspeak(JNIEnv* env, jstring text, jstring dataPath, jstring vo
     return result;
 }
 
-// Request interruption of an in-flight eSpeak synthesis (no-op for SAM/DECtalk).
+// ================= openevv (Eloquence) Core =================
+static std::vector<short> openevv_buffer;
+static const int EVV_FRAME_SIZE = 2048;
+static short evv_frame_buf[EVV_FRAME_SIZE];
+static OldInst *g_openevvEngine = nullptr;
+static std::atomic<bool> g_cancelRequested{false};
+
+static enum ECICallbackReturn STDCALL openevv_callback(OldInst *h, enum ECIMessage msg, long param, void *data) {
+    (void)h;
+    (void)data;
+    if (msg == eciWaveformBuffer && param > 0) {
+        openevv_buffer.insert(openevv_buffer.end(), evv_frame_buf, evv_frame_buf + param);
+    }
+    return g_cancelRequested.load() ? eciDataAbort : eciDataProcessed;
+}
+
+static bool ensureOpenevv() {
+    if (g_openevvEngine != nullptr) return true;
+    evv_port_start();
+    evvRunStaticInitialisers();
+    uint32_t langs[32];
+    int count = 32;
+    if (eo_getAvailableLanguages(langs, &count) != 0 || count < 1) {
+        return false;
+    }
+    g_openevvEngine = eo_new();
+    if (!g_openevvEngine) {
+        g_openevvEngine = eo_newEx(langs[0]);
+    }
+    if (!g_openevvEngine) {
+        return false;
+    }
+    eo_registerCallback(g_openevvEngine, (void*)openevv_callback, nullptr);
+    if (!ev_setOutputBuffer(g_openevvEngine, EVV_FRAME_SIZE, evv_frame_buf)) {
+        return false;
+    }
+    return true;
+}
+
+jbyteArray doSynthOpenevv(JNIEnv* env, jstring text, jint voiceIndex, jint pitch, jint speechRate) {
+    const char *nativeText = env->GetStringUTFChars(text, 0);
+    if (!nativeText) return env->NewByteArray(0);
+
+    if (!ensureOpenevv()) {
+        env->ReleaseStringUTFChars(text, nativeText);
+        return env->NewByteArray(0);
+    }
+
+    g_cancelRequested.store(false);
+    openevv_buffer.clear();
+
+    // Voice preset: 1 to 8 (Reed, Shelley, Bobby, Glen, Sandy, Grandma, Grandpa, Rocko)
+    int vIdx = voiceIndex;
+    if (vIdx < 1 || vIdx > 8) vIdx = 1;
+    vc_copyVoice(g_openevvEngine, vIdx, 0);
+
+    // Scale speed (default ~50 in engine units) and pitch (default ~65 in engine units)
+    int baseSpeed = vc_getVoiceParam(g_openevvEngine, vIdx, EVV_V_SPEED);
+    int basePitch = vc_getVoiceParam(g_openevvEngine, vIdx, EVV_V_PITCH);
+
+    int newSpeed = baseSpeed * (speechRate > 0 ? speechRate : 100) / 100;
+    if (newSpeed < 10) newSpeed = 10;
+    if (newSpeed > 250) newSpeed = 250;
+
+    int newPitch = basePitch * (pitch > 0 ? pitch : 100) / 100;
+    if (newPitch < 10) newPitch = 10;
+    if (newPitch > 100) newPitch = 100;
+
+    vc_setVoiceParam(g_openevvEngine, 0, EVV_V_SPEED, newSpeed);
+    vc_setVoiceParam(g_openevvEngine, 0, EVV_V_PITCH, newPitch);
+
+    if (et_addText(g_openevvEngine, nativeText) && et_synthesize(g_openevvEngine)) {
+        for (int i = 0; i < 30000 && !g_cancelRequested.load() && eo_speaking(g_openevvEngine); ++i) {
+            evv_sleep_ms(1);
+        }
+    }
+    eo_synchronizeSynth(g_openevvEngine);
+
+    jbyteArray result = upscaleAndSmooth(env, openevv_buffer.data(), (int)openevv_buffer.size(), 11025, false);
+
+    env->ReleaseStringUTFChars(text, nativeText);
+    return result;
+}
+
 void doCancelEspeak() {
     if (g_espeakInited) espeak_Cancel();
 }
 
-// ================= JNI EXPORTS =================
-// NOTE: the JNI long name MUST match the Kotlin package/class, otherwise the runtime raises
-// UnsatisfiedLinkError on the first synthesis call. Keep these in sync with
-// com.animeshahilya.retrotts.{MainActivity,RetroTtsService}.
+void doCancelOpenevv() {
+    if (g_openevvEngine != nullptr) {
+        eo_stop(g_openevvEngine);
+    }
+}
 
+// ================= JNI EXPORTS =================
 extern "C" {
     // MainActivity bindings
     JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_MainActivity_synthSam(JNIEnv* env, jobject, jstring text, jint pitch, jint speechRate) {
@@ -333,6 +518,10 @@ extern "C" {
     JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_MainActivity_synthEspeak(JNIEnv* env, jobject, jstring text, jstring dataPath, jstring voiceName, jint pitch, jint speechRate) {
         std::lock_guard<std::mutex> lock(g_synthMutex);
         return doSynthEspeak(env, text, dataPath, voiceName, pitch, speechRate);
+    }
+    JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_MainActivity_synthOpenevv(JNIEnv* env, jobject, jstring text, jint voiceIndex, jint pitch, jint speechRate) {
+        std::lock_guard<std::mutex> lock(g_synthMutex);
+        return doSynthOpenevv(env, text, voiceIndex, pitch, speechRate);
     }
 
     // RetroTtsService bindings
@@ -348,9 +537,15 @@ extern "C" {
         std::lock_guard<std::mutex> lock(g_synthMutex);
         return doSynthEspeak(env, text, dataPath, voiceName, pitch, speechRate);
     }
-
-    JNIEXPORT void JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_cancelSynth(JNIEnv*, jobject) {
+    JNIEXPORT jbyteArray JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_synthOpenevv(JNIEnv* env, jobject, jstring text, jint voiceIndex, jint pitch, jint speechRate) {
         std::lock_guard<std::mutex> lock(g_synthMutex);
+        return doSynthOpenevv(env, text, voiceIndex, pitch, speechRate);
+    }
+
+    // Lock-free instant cancellation for TalkBack responsiveness
+    JNIEXPORT void JNICALL Java_com_animeshahilya_retrotts_RetroTtsService_cancelSynth(JNIEnv*, jobject) {
+        g_cancelRequested.store(true);
         doCancelEspeak();
+        doCancelOpenevv();
     }
 }

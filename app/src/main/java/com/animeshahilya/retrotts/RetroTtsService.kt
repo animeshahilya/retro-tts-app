@@ -99,6 +99,9 @@ class RetroTtsService : TextToSpeechService() {
                 // Pass the files dir (which contains espeak-ng-data), NOT a non-existent
                 // "espeakdata" subdir. A wrong path makes espeak_Initialize fail.
                 synthEspeak(text, filesDir.absolutePath, voice, pitch, speechRate)
+            } else if (activeEngine == "OPENEVV") {
+                val voice = prefs.getInt("openevv_voice", 1)
+                synthOpenevv(text, voice, pitch, speechRate)
             } else {
                 ByteArray(0)
             }
@@ -114,23 +117,31 @@ class RetroTtsService : TextToSpeechService() {
             return
         }
 
-        // Stream in chunks so an onStop() can interrupt delivery and TalkBack stays responsive.
+        // Stream in small chunks so an onStop() can interrupt delivery immediately and TalkBack stays responsive.
         var offset = 0
-        val chunkSize = 4096
+        val chunkSize = 2048
         while (offset < pcmData.size) {
-            if (stopRequested.get()) break
+            if (stopRequested.get()) {
+                return
+            }
             val count = minOf(chunkSize, pcmData.size - offset)
-            callback.audioAvailable(pcmData, offset, count)
+            val result = callback.audioAvailable(pcmData, offset, count)
+            if (result != TextToSpeech.SUCCESS) {
+                return
+            }
             offset += count
         }
 
-        callback.done()
+        if (!stopRequested.get()) {
+            callback.done()
+        }
     }
 
     // JNI External functions
     private external fun synthSam(text: String, pitch: Int, speechRate: Int): ByteArray
     private external fun synthDectalk(text: String, pitch: Int, speechRate: Int): ByteArray
     private external fun synthEspeak(text: String, dataPath: String, voiceName: String, pitch: Int, speechRate: Int): ByteArray
+    private external fun synthOpenevv(text: String, voice: Int, pitch: Int, speechRate: Int): ByteArray
     private external fun cancelSynth()
 
     // Languages eSpeak can actually speak, derived from the unpacked voice files so the set grows
